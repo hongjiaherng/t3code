@@ -1,10 +1,10 @@
 # About this fork
 
-This is a fork of [pingdotgg/t3code](https://github.com/pingdotgg/t3code) with one
-addition: it renders **LaTeX math in chat** with KaTeX (`$…$` for inline, `$$…$$` for
-display). Upstream turned this down in
-[issue #1784](https://github.com/pingdotgg/t3code/issues/1784), so it lives here.
-Everything else is stock T3 Code.
+This is a fork of [pingdotgg/t3code](https://github.com/pingdotgg/t3code) with two
+additions: it renders **LaTeX math in chat** with KaTeX (`$…$` for inline, `$$…$$` for
+display), turned down upstream in
+[issue #1784](https://github.com/pingdotgg/t3code/issues/1784), and it adds an experimental
+**Claude PTY provider** (see below). Everything else is stock T3 Code.
 
 Grab a desktop build from this repo's
 [Releases](https://github.com/hongjiaherng/t3code/releases). Installed copies
@@ -33,6 +33,27 @@ git push --force-with-lease origin feat/chat-math-katex
 ```
 
 The force-push kicks off the release build. Close the issue once the tag has landed.
+
+## Claude PTY provider (experimental)
+
+Lives on the `feat/claude-pty` branch (branched from `feat/chat-math-katex`), kept off the
+default branch because it is large. A new `claudePty` provider runs the interactive `claude`
+CLI in a pseudo-terminal, types prompts in via bracketed paste, and tails Claude's
+`~/.claude/projects/.../<session>.jsonl` transcript to turn assistant text, tool calls, and
+results into normal chat activity. So you get Claude Code's subscription login and interactive
+mode, rendered inside T3.
+
+Where it lives:
+
+- Server: `provider/Drivers/ClaudePtyDriver.ts`, `provider/Layers/ClaudePtyAdapter.ts` +
+  `ClaudePtyProvider.ts`, `provider/Services/ClaudePtyAdapter.ts`, `provider/ptyTerminalText.ts`,
+  wired up in `provider/builtInDrivers.ts`.
+- Contracts: `ClaudePtySettings` in `packages/contracts/src/settings.ts`.
+- Web: the picker, settings, and icons learn about `claudePty`.
+
+It is off by default. Turn it on under Settings > Providers, with the `claude` CLI installed
+and signed in. It only works locally, does not handle attachments, and shares Claude's model
+list.
 
 ## Remotes
 

@@ -158,6 +158,7 @@ function createBaseServerConfig(): ServerConfig {
           customModels: [],
           launchArgs: "",
         },
+        claudePty: { enabled: false, binaryPath: "claude", customModels: [] },
         cursor: { enabled: true, binaryPath: "", apiEndpoint: "", customModels: [] },
         grok: { enabled: true, binaryPath: "", customModels: [] },
         opencode: {

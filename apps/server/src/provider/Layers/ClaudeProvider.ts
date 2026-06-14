@@ -39,7 +39,7 @@ import {
 } from "../providerSnapshot.ts";
 import { makeClaudeEnvironment } from "../Drivers/ClaudeHome.ts";
 
-const DEFAULT_CLAUDE_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
+export const DEFAULT_CLAUDE_MODEL_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
 });
 
@@ -817,3 +817,9 @@ export const makePendingClaudeProvider = (
   });
 
 export { probeClaudeCapabilities };
+
+/**
+ * Claude's built-in model list, reused by the experimental Claude PTY driver
+ * ({@link ./ClaudePtyProvider}) since it targets the same Claude models.
+ */
+export { BUILT_IN_MODELS as CLAUDE_BUILT_IN_MODELS };

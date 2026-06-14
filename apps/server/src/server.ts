@@ -307,7 +307,13 @@ const RuntimeCoreDependenciesLive = ReactorLayerLive.pipe(
   // `ProviderService` (canonical stream, written after event normalization).
   // Provided once at the runtime level so every consumer sees the same
   // logger instances.
-  Layer.provideMerge(ProviderEventLoggersLive),
+  // `ClaudePtyDriver.create()` yields `PtyAdapter` (it drives the interactive
+  // `claude` terminal through a PTY), so it is merged alongside the shared
+  // event loggers and provided at the runtime level — this keeps the instance
+  // registry hydration able to construct the driver without adding another
+  // step to this pipe (which is at its overload arity limit). The terminal
+  // layer consumes its own `PtyAdapterLive` internally and does not expose it.
+  Layer.provideMerge(Layer.mergeAll(ProviderEventLoggersLive, PtyAdapterLive)),
   // `OpenCodeDriver.create()` yields `OpenCodeRuntime`; previously the old
   // `ProviderRegistryLive` pulled `OpenCodeRuntimeLive` in for itself, but
   // the rewritten registry reads snapshots off the instance registry and

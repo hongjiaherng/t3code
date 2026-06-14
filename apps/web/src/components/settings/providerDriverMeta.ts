@@ -1,4 +1,5 @@
 import {
+  ClaudePtySettings,
   ClaudeSettings,
   CodexSettings,
   CursorSettings,
@@ -46,6 +47,13 @@ export const PROVIDER_CLIENT_DEFINITIONS: readonly ProviderClientDefinition[] = 
     label: "Claude",
     icon: ClaudeAI,
     settingsSchema: ClaudeSettings,
+  },
+  {
+    value: ProviderDriverKind.make("claudePty"),
+    label: "Claude PTY",
+    icon: ClaudeAI,
+    badgeLabel: "Experimental",
+    settingsSchema: ClaudePtySettings,
   },
   {
     value: ProviderDriverKind.make("cursor"),
