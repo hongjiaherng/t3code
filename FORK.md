@@ -32,34 +32,41 @@ origin    https://github.com/hongjiaherng/t3code.git   (this fork - we push here
 upstream  https://github.com/pingdotgg/t3code.git       (read-only - we pull updates)
 ```
 
-The feature lives on the branch **`feat/chat-math-katex`** as a thin set of commits on
-top of upstream `main`. Keep `main` as a clean mirror of upstream so rebases stay easy.
+**`feat/chat-math-katex`** is the patched line and is the fork's **default branch**
+(required so the scheduled sync workflow runs and so merging a sync PR triggers a
+build). Upstream releases are merged into it via automated PRs (below), so its history
+is the KaTeX patch plus upstream merge commits.
 
-## Syncing with upstream
+## Syncing with upstream (automated)
 
-Because the change is tiny and isolated, rebasing it onto new upstream releases is
-usually conflict-free (only the plugin-array line in `ChatMarkdown.tsx` can conflict,
-and it's a trivial resolve).
+`.github/workflows/sync-upstream.yml` runs daily. When upstream publishes a new
+**stable** release it:
+
+1. merges that release into the patch branch on a `sync/upstream-<version>` branch,
+   auto-resolving the inevitable `pnpm-lock.yaml` conflict and refreshing the lockfile,
+2. opens a **pull request** into the default branch.
+
+With `RELEASE_PAT` configured the bot **auto-merges** that PR (it stays in the PR list
+as a record of the sync), which pushes to the default branch and triggers
+`release-fork.yml` to build and publish `v<version>-katex.*`. Zero clicks. Without
+`RELEASE_PAT` the PR is left open for you to merge by hand (a merge done with the
+built-in token can't trigger the build, so the PAT is what makes it hands-off). If the
+merge hits a conflict the bot can't resolve (usually only `ChatMarkdown.tsx`), it opens
+an **issue** instead.
+
+### Manual sync (fallback, when the bot opens an issue)
 
 ```bash
-# 1. Refresh the upstream mirror
-git fetch upstream
-git checkout main
-git merge --ff-only upstream/main      # main stays a pure mirror
-git push origin main
-
-# 2. Replay our feature on top of the latest upstream
+git fetch upstream --tags
 git checkout feat/chat-math-katex
-git rebase main
-# (resolve the ChatMarkdown.tsx plugin-array conflict if prompted, then:)
-#   git add -A && git rebase --continue
-
-# 3. Refresh the lockfile in case upstream changed deps, then push
-vp install
-git push --force-with-lease origin feat/chat-math-katex
+git merge v<version>            # the upstream tag named in the issue
+# resolve conflicts (usually just ChatMarkdown.tsx), then:
+vp install                      # refresh the lockfile
+git commit
+git push origin feat/chat-math-katex
 ```
 
-Then cut a release (below). Tag from `feat/chat-math-katex`, not `main`.
+Pushing to the default branch triggers the release build directly.
 
 ## Releasing your own builds
 
@@ -73,25 +80,36 @@ this repo, using the built-in `GITHUB_TOKEN`.
 pointing at `hongjiaherng/t3code` releases - no code change needed. Installed builds
 update from this fork.
 
-### To cut a release
+### How a release is cut
+
+A release is published automatically whenever the default branch is pushed (i.e. when
+you merge a sync PR): `release-fork.yml` reads the merged-in upstream app version and
+publishes `v<version>-katex.<run>`. It no-ops if that upstream version was already
+released. You can also trigger it manually:
 
 ```bash
-git checkout feat/chat-math-katex
-git tag v0.0.27-katex.1      # any vX.Y.Z[-suffix] tag
+# Manual tag (first release, or to re-cut one)
+git tag v0.0.27-katex.1
 git push origin v0.0.27-katex.1
 ```
 
-…or run the **Release (fork)** workflow manually (Actions tab → Run workflow → enter a
-version). The tag/`workflow_dispatch` triggers the build; artifacts land on the
-GitHub Release for that tag.
+...or run the **Release (fork)** workflow from the Actions tab (Run workflow, enter a
+version). Artifacts land on the GitHub Release for that tag.
 
 ### One-time fork setup in GitHub
 
-1. **Disable upstream's `release.yml`** in this fork: Actions tab → "Release" workflow →
-   `•••` → _Disable workflow_. (Doing it via the UI means no file edit, so it never
-   causes rebase conflicts.) Upstream's workflow can't run here anyway - it needs T3's
+1. **Set `feat/chat-math-katex` as the fork's default branch** (Settings, Branches).
+   Required: GitHub only runs scheduled workflows from the default branch, and the
+   release build triggers on pushes to it.
+2. **Disable upstream's `release.yml`** in this fork: Actions tab, "Release" workflow,
+   `...`, _Disable workflow_. (Doing it via the UI means no file edit, so it never
+   causes merge conflicts.) Upstream's workflow can't run here anyway - it needs T3's
    private `production` environment, npm/Vercel/Discord secrets, and a GitHub App token.
-2. Nothing else is required for a **local-only** build (cloud features off).
+3. **(For hands-off auto-merge)** Add a repo secret `RELEASE_PAT`: a fine-grained PAT
+   scoped to this fork with **Contents: read/write** and **Pull requests: read/write**.
+   The sync bot uses it to merge each PR so the build fires automatically. Skip this and
+   the PR is opened but waits for you to merge it by hand.
+4. Nothing else is required for a **local-only** build (cloud features off).
 
 ### Cloud features (optional)
 

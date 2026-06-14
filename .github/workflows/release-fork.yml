@@ -32,6 +32,9 @@ on:
         required: true
         type: string
   push:
+    # Merging a sync PR pushes here; build + publish the matching release.
+    branches:
+      - feat/chat-math-katex
     tags:
       - "v*.*.*"
 
@@ -46,6 +49,7 @@ jobs:
     outputs:
       version: ${{ steps.meta.outputs.version }}
       tag: ${{ steps.meta.outputs.tag }}
+      skip: ${{ steps.meta.outputs.skip }}
       ref: ${{ github.sha }}
     steps:
       - name: Checkout
@@ -68,31 +72,51 @@ jobs:
         shell: bash
         env:
           DISPATCH_VERSION: ${{ github.event.inputs.version }}
+          GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
           if [[ "${GITHUB_EVENT_NAME}" == "workflow_dispatch" ]]; then
-            raw="${DISPATCH_VERSION}"
+            version="${DISPATCH_VERSION#v}"
+            tag="v${version}"
+          elif [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+            version="${GITHUB_REF_NAME#v}"
+            tag="${GITHUB_REF_NAME}"
           else
-            raw="${GITHUB_REF_NAME}"
+            # Push to the default branch (e.g. a merged sync PR): derive the
+            # release version from the upstream app version we just merged in.
+            app_ver="$(node -p "require('./apps/desktop/package.json').version")"
+            existing="$(gh api "repos/${GITHUB_REPOSITORY}/releases?per_page=100" \
+              -q "[.[].tag_name] | map(select(startswith(\"v${app_ver}-katex.\"))) | length" 2>/dev/null || echo 0)"
+            if [[ "${existing}" != "0" ]]; then
+              echo "v${app_ver}-katex.* already released; skipping build."
+              echo "skip=true" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            version="${app_ver}-katex.${GITHUB_RUN_NUMBER}"
+            tag="v${version}"
           fi
-          version="${raw#v}"
           if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z.-]+)?$ ]]; then
-            echo "Invalid release version: $raw" >&2
+            echo "Invalid release version: $version" >&2
             exit 1
           fi
-          echo "version=$version" >> "$GITHUB_OUTPUT"
-          echo "tag=v$version" >> "$GITHUB_OUTPUT"
+          echo "skip=false" >> "$GITHUB_OUTPUT"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=${tag}" >> "$GITHUB_OUTPUT"
+          echo "Resolved version=${version} tag=${tag}"
 
       # Quality gates required by AGENTS.md.
       - name: Check
+        if: steps.meta.outputs.skip != 'true'
         run: vp check
 
       - name: Typecheck
+        if: steps.meta.outputs.skip != 'true'
         run: vp run typecheck
 
   build:
     name: Build ${{ matrix.label }}
     needs: preflight
+    if: needs.preflight.outputs.skip != 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     env:

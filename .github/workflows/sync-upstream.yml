@@ -1,0 +1,169 @@
+name: Sync upstream (open PR)
+
+# Fork-sync bot: when upstream cuts a new STABLE release, it merges that release
+# into the KaTeX patch branch on a sync/* branch and opens a PR. You review and
+# merge the PR; merging it pushes to the default branch, which triggers
+# release-fork.yml to build and publish. On a conflict it can't auto-resolve, it
+# opens an issue instead of a PR.
+#
+# Requirements (see FORK.md):
+#   - This patch branch must be the fork's DEFAULT branch, or the schedule below
+#     never runs (GitHub only schedules workflows on the default branch).
+#   - Secret RELEASE_PAT (a token with contents + pull-requests write): lets the
+#     bot AUTO-MERGE the PR so release-fork.yml fires. A merge done with the
+#     built-in GITHUB_TOKEN cannot trigger another workflow, so without the PAT
+#     the PR is opened but left for you to merge by hand (your click triggers the
+#     build). The PR is always opened, as a record of each sync.
+
+on:
+  schedule:
+    - cron: "0 7 * * *" # daily 07:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout fork (full history)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT || github.token }}
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Configure git and upstream remote
+        run: |
+          set -euo pipefail
+          git config user.name "fork-sync-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/pingdotgg/t3code.git 2>/dev/null \
+            || git remote set-url upstream https://github.com/pingdotgg/t3code.git
+          git fetch upstream --tags --prune
+
+      - name: Resolve latest upstream stable release
+        id: up
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=$(gh api repos/pingdotgg/t3code/releases/latest -q .tag_name)
+          [ -n "$tag" ] || { echo "No upstream stable release found." >&2; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "Latest upstream stable: $tag"
+
+      - name: Decide whether to sync
+        id: guard
+        run: |
+          set -euo pipefail
+          tag="${{ steps.up.outputs.tag }}"
+          ver="${{ steps.up.outputs.version }}"
+          if git merge-base --is-ancestor "refs/tags/$tag" HEAD; then
+            echo "Branch already contains $tag; nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif git ls-remote --exit-code --heads origin "sync/upstream-$ver" >/dev/null 2>&1; then
+            echo "sync/upstream-$ver already exists; PR is presumably open."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Merge upstream into a sync branch
+        id: merge
+        if: steps.guard.outputs.skip == 'false'
+        run: |
+          set -uo pipefail
+          tag="${{ steps.up.outputs.tag }}"
+          ver="${{ steps.up.outputs.version }}"
+          branch="sync/upstream-$ver"
+          git checkout -b "$branch"
+
+          git merge --no-edit "refs/tags/$tag"
+          rc=$?
+          # The lockfile collides with upstream's on every release. Auto-resolve
+          # by taking upstream's (--theirs in a merge) and reconciling below.
+          while [ $rc -ne 0 ]; do
+            conflicted=$(git diff --name-only --diff-filter=U)
+            if [ "$conflicted" = "pnpm-lock.yaml" ]; then
+              git checkout --theirs -- pnpm-lock.yaml
+              git add pnpm-lock.yaml
+              git commit --no-edit
+              rc=$?
+            else
+              echo "conflicts<<EOF" >> "$GITHUB_OUTPUT"
+              echo "$conflicted" >> "$GITHUB_OUTPUT"
+              echo "EOF" >> "$GITHUB_OUTPUT"
+              git merge --abort || true
+              echo "ok=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
+          set -e
+          # Add our deps (katex/remark-math/rehype-katex) on top of upstream's
+          # lockfile so the merged tree installs cleanly with a frozen lockfile.
+          vp install --lockfile-only
+          if ! git diff --quiet -- pnpm-lock.yaml; then
+            git add pnpm-lock.yaml
+            git commit -m "chore: refresh lockfile for upstream $tag"
+          fi
+          git push --force-with-lease origin "$branch"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - name: Open and auto-merge pull request
+        if: steps.guard.outputs.skip == 'false' && steps.merge.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT || github.token }}
+          HAS_PAT: ${{ secrets.RELEASE_PAT != '' }}
+        run: |
+          set -euo pipefail
+          base="${GITHUB_REF_NAME}"
+          branch="${{ steps.merge.outputs.branch }}"
+          tag="${{ steps.up.outputs.tag }}"
+          body=$'Merges upstream `'"$tag"$'` into the KaTeX fork. Kept as a record of the sync.\n\nMerging pushes to `'"$base"$'`, which triggers release-fork.yml to build and publish `v'"${{ steps.up.outputs.version }}"$'-katex.*`.'
+          gh pr create --base "$base" --head "$branch" \
+            --title "Sync to upstream $tag" --body "$body" \
+            || echo "PR may already exist; continuing."
+
+          if [ "$HAS_PAT" != "true" ]; then
+            echo "::warning::RELEASE_PAT not set. PR left open; merge it by hand (a user action) to trigger the release build."
+            exit 0
+          fi
+
+          # Auto-merge. Retry while GitHub finishes computing mergeability.
+          for attempt in 1 2 3 4 5 6; do
+            if gh pr merge "$branch" --merge --delete-branch; then
+              echo "Merged $branch; release-fork.yml builds on the push to $base."
+              exit 0
+            fi
+            echo "Merge not ready (attempt $attempt); waiting 10s..."
+            sleep 10
+          done
+          echo "::warning::Could not auto-merge the PR; merge it manually to trigger the build."
+
+      - name: Open issue on conflict
+        if: steps.guard.outputs.skip == 'false' && steps.merge.outputs.ok == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          body=$'Auto-merge of upstream `${{ steps.up.outputs.tag }}` hit conflicts the bot could not resolve:\n\n```\n${{ steps.merge.outputs.conflicts }}\n```\n\nSync locally (see FORK.md > Syncing with upstream), push, and open the PR yourself. The next scheduled run will skip while a sync branch exists.'
+          gh issue create --title "Manual sync needed for upstream ${{ steps.up.outputs.tag }}" --body "$body" \
+            || echo "Issue creation failed (continuing)."
