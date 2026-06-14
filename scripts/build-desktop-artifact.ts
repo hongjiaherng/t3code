@@ -745,7 +745,12 @@ const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     if (signed) {
       winConfig.azureSignOptions = yield* AzureTrustedSigningOptionsConfig;
     } else {
-      winConfig.signAndEditExecutable = false;
+      // Fork builds ship unsigned. Keep executable editing on (the default) so
+      // rcedit still embeds our icon and version metadata into the .exe; without
+      // it Windows falls back to the stock Electron icon on the taskbar and Start
+      // menu. electron-builder skips the signing step on its own when no
+      // certificate is configured, so this stays unsigned.
+      winConfig.signAndEditExecutable = true;
     }
     buildConfig.win = winConfig;
   }

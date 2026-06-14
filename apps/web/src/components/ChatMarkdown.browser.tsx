@@ -158,6 +158,37 @@ describe("ChatMarkdown", () => {
     }
   });
 
+  it("renders inline math with KaTeX", async () => {
+    const screen = await render(
+      <ChatMarkdown
+        text={"Euler's identity is $e^{i\\pi} + 1 = 0$ exactly."}
+        cwd="/repo/project"
+      />,
+    );
+
+    try {
+      await vi.waitFor(() => {
+        expect(document.querySelector(".katex")).not.toBeNull();
+      });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("renders display math as a KaTeX block", async () => {
+    const screen = await render(
+      <ChatMarkdown text={"$$\n\\int_0^1 x^2 \\, dx = \\frac{1}{3}\n$$"} cwd="/repo/project" />,
+    );
+
+    try {
+      await vi.waitFor(() => {
+        expect(document.querySelector(".katex-display")).not.toBeNull();
+      });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("keeps normal web links unchanged", async () => {
     const screen = await render(
       <ChatMarkdown text="[OpenAI](https://openai.com/docs)" cwd="/repo/project" />,

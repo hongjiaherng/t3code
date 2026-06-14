@@ -1,5 +1,7 @@
 # T3 Code
 
+> Fork note: this build also renders LaTeX math in chat with KaTeX. See [FORK.md](FORK.md) for what is different and how it tracks upstream.
+
 T3 Code is a minimal web GUI for coding agents (currently Codex, Claude, Cursor, and OpenCode, more coming soon).
 
 ## Installation
