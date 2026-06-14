@@ -27,10 +27,13 @@ import React, {
 import type { Components } from "react-markdown";
 import ReactMarkdown from "react-markdown";
 import { defaultUrlTransform } from "react-markdown";
+import rehypeKatex from "rehype-katex";
 import rehypeRaw from "rehype-raw";
 import rehypeSanitize, { defaultSchema } from "rehype-sanitize";
 import remarkBreaks from "remark-breaks";
 import remarkGfm from "remark-gfm";
+import remarkMath from "remark-math";
+import "katex/dist/katex.min.css";
 import { renderSkillInlineMarkdownChildren } from "./chat/SkillInlineText";
 import { CHAT_FILE_TAG_CHIP_CLASS_NAME, FileTagChipContent } from "./chat/FileTagChip";
 import { VscodeEntryIcon } from "./chat/VscodeEntryIcon";
@@ -113,10 +116,19 @@ const highlightedCodeCache = new LRUCache<string>(
 const highlighterPromiseCache = new Map<string, Promise<DiffsHighlighter>>();
 const CHAT_MARKDOWN_SANITIZE_SCHEMA = {
   ...defaultSchema,
+  // remark-math emits <span class="math math-inline"> / <div class="math math-display">
+  // wrappers holding the raw TeX. rehype-katex runs *after* sanitize and turns those
+  // wrappers into rendered output, so the wrappers (and the div tag) must survive here.
+  tagNames: [...(defaultSchema.tagNames ?? []), "div"],
   attributes: {
     ...defaultSchema.attributes,
     "*": (defaultSchema.attributes?.["*"] ?? []).filter((attribute) => attribute !== "title"),
     code: [...(defaultSchema.attributes?.code ?? []), "dataCodeMeta"],
+    span: [
+      ...(defaultSchema.attributes?.span ?? []),
+      ["className", "math", "math-inline", "math-display"],
+    ],
+    div: [...(defaultSchema.attributes?.div ?? []), ["className", "math", "math-display"]],
   },
   protocols: {
     ...defaultSchema.protocols,
@@ -1339,10 +1351,10 @@ function ChatMarkdown({
       <ReactMarkdown
         remarkPlugins={
           lineBreaks
-            ? [remarkGfm, remarkBreaks, remarkPreserveCodeMeta]
-            : [remarkGfm, remarkPreserveCodeMeta]
+            ? [remarkGfm, remarkMath, remarkBreaks, remarkPreserveCodeMeta]
+            : [remarkGfm, remarkMath, remarkPreserveCodeMeta]
         }
-        rehypePlugins={[rehypeRaw, [rehypeSanitize, CHAT_MARKDOWN_SANITIZE_SCHEMA]]}
+        rehypePlugins={[rehypeRaw, [rehypeSanitize, CHAT_MARKDOWN_SANITIZE_SCHEMA], rehypeKatex]}
         components={markdownComponents}
         urlTransform={markdownUrlTransform}
       >

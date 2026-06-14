@@ -1,0 +1,202 @@
+name: Sync upstream (rebase + PR)
+
+# Fork-sync bot: when upstream cuts a new STABLE release, it REBASES the KaTeX
+# patch stack onto that release on a sync/* branch and opens a PR. With a
+# RELEASE_PAT it then fast-forwards the default branch to the rebased tip
+# (a force-push), which triggers release-fork.yml to build and publish and
+# closes the PR as merged. On a conflict it can't auto-resolve, it opens an
+# issue and stands down until you resolve it.
+#
+# Why rebase + force-push: replaying our commits on top of each upstream release
+# keeps a linear `upstream + katex` history (no merge commits), but it rewrites
+# the patch SHAs, so landing it is necessarily a non-fast-forward (force) update
+# of the default branch. That force-push is inherent to the rebase model - it is
+# the price of keeping the patches cleanly on top.
+#
+# Requirements (see FORK.md):
+#   - This patch branch must be the fork's DEFAULT branch, or the schedule below
+#     never runs (GitHub only schedules workflows on the default branch).
+#   - Secret RELEASE_PAT (token with contents + pull-requests write): lets the
+#     bot push to the default branch AND have that push trigger release-fork.yml.
+#     A push made with the built-in GITHUB_TOKEN cannot trigger another workflow,
+#     so without the PAT the PR is opened but left for you to land by hand (a
+#     local fast-forward; a UI "Merge" would add a merge commit and break the
+#     linear history). The PR is always opened, as a record of each sync.
+#   - The default branch must allow the bot to force-push (no protection rule
+#     that blocks non-fast-forward pushes, or one that exempts the PAT).
+
+on:
+  schedule:
+    - cron: "0 7 * * *" # daily 07:00 UTC
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+concurrency:
+  group: sync-upstream
+  cancel-in-progress: false
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout fork (full history)
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.RELEASE_PAT || github.token }}
+
+      - name: Setup Vite+
+        uses: voidzero-dev/setup-vp@v1
+        with:
+          node-version-file: package.json
+          cache: true
+          run-install: false
+
+      - name: Configure git and upstream remote
+        run: |
+          set -euo pipefail
+          git config user.name "fork-sync-bot"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote add upstream https://github.com/pingdotgg/t3code.git 2>/dev/null \
+            || git remote set-url upstream https://github.com/pingdotgg/t3code.git
+          git fetch upstream --tags --prune
+
+      - name: Resolve latest upstream stable release
+        id: up
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag=$(gh api repos/pingdotgg/t3code/releases/latest -q .tag_name)
+          [ -n "$tag" ] || { echo "No upstream stable release found." >&2; exit 1; }
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
+          echo "Latest upstream stable: $tag"
+
+      - name: Decide whether to sync
+        id: guard
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.up.outputs.tag }}"
+          ver="${{ steps.up.outputs.version }}"
+          title="Manual sync needed for upstream $tag"
+          if git merge-base --is-ancestor "refs/tags/$tag" HEAD; then
+            echo "Branch already contains $tag; nothing to do."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif git ls-remote --exit-code --heads origin "sync/upstream-$ver" >/dev/null 2>&1; then
+            echo "sync/upstream-$ver already exists; a sync is presumably in flight."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          elif [ "$(gh issue list --state open --limit 100 --json title \
+                    -q "[.[] | select(.title==\"$title\")] | length")" != "0" ]; then
+            echo "An open conflict issue for $tag exists; waiting for manual resolution."
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Rebase patch stack onto the upstream release
+        id: rebase
+        if: steps.guard.outputs.skip == 'false'
+        env:
+          # Never let a replay/continue drop into an interactive editor.
+          GIT_EDITOR: "true"
+          GIT_SEQUENCE_EDITOR: "true"
+        run: |
+          set -uo pipefail
+          tag="${{ steps.up.outputs.tag }}"
+          ver="${{ steps.up.outputs.version }}"
+          branch="sync/upstream-$ver"
+
+          # Our patches = every commit on the default branch since its merge-base
+          # with the upstream tag. Replay just those onto the tag.
+          git checkout -b "$branch"
+          base="$(git merge-base HEAD "refs/tags/$tag")"
+          git rebase --onto "refs/tags/$tag" "$base"
+          rc=$?
+
+          # The lockfile collides with upstream's on every release. Auto-resolve
+          # it and reconcile below. NOTE: in a rebase the sides are swapped, so
+          # upstream (the series we replay ONTO) is "ours" - that is the one to
+          # keep here. Any other conflicted file is a real one -> bail to an issue.
+          while [ $rc -ne 0 ]; do
+            conflicted="$(git diff --name-only --diff-filter=U)"
+            if [ "$conflicted" = "pnpm-lock.yaml" ]; then
+              git checkout --ours -- pnpm-lock.yaml
+              git add -- pnpm-lock.yaml
+              git rebase --continue
+              rc=$?
+            else
+              echo "conflicts<<EOF" >> "$GITHUB_OUTPUT"
+              echo "$conflicted" >> "$GITHUB_OUTPUT"
+              echo "EOF" >> "$GITHUB_OUTPUT"
+              git rebase --abort || true
+              echo "ok=false" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+          done
+
+          set -e
+          # Re-derive the lockfile from the rebased tree so our katex deps are
+          # present and a frozen install passes, then fold it into the tip commit.
+          # Amending (vs a fresh commit) keeps the patch stack a fixed height as
+          # this replays every release.
+          vp install --lockfile-only
+          if ! git diff --quiet -- pnpm-lock.yaml; then
+            git add -- pnpm-lock.yaml
+            git commit --amend --no-edit
+          fi
+
+          git push --force-with-lease origin "$branch"
+          echo "branch=$branch" >> "$GITHUB_OUTPUT"
+          echo "ok=true" >> "$GITHUB_OUTPUT"
+
+      - name: Open PR and land the rebase
+        if: steps.guard.outputs.skip == 'false' && steps.rebase.outputs.ok == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.RELEASE_PAT || github.token }}
+          HAS_PAT: ${{ secrets.RELEASE_PAT != '' }}
+        run: |
+          set -euo pipefail
+          base="${GITHUB_REF_NAME}"
+          branch="${{ steps.rebase.outputs.branch }}"
+          tag="${{ steps.up.outputs.tag }}"
+          ver="${{ steps.up.outputs.version }}"
+          body=$'Rebases the KaTeX patch stack onto upstream `'"$tag"$'`. Kept as a record of the sync.\n\nWith `RELEASE_PAT` set, the bot fast-forwards `'"$base"$'` to this branch (clean, linear history), which triggers release-fork.yml to build and publish `v'"$ver"$'-katex.*` and closes this PR as merged.'
+          gh pr create --base "$base" --head "$branch" \
+            --title "Sync to upstream $tag" --body "$body" \
+            || echo "PR may already exist; continuing."
+
+          if [ "$HAS_PAT" != "true" ]; then
+            echo "::warning::RELEASE_PAT not set. PR left open. Land it with a local fast-forward (git push --force-with-lease origin $branch:$base) to keep linear history and fire the build; a UI Merge would add a merge commit."
+            exit 0
+          fi
+
+          # Land = fast-forward the default branch to the rebased tip. This is a
+          # non-fast-forward update of the patch SHAs, so force is required. The
+          # push uses RELEASE_PAT (configured on the checked-out remote), which is
+          # what lets it trigger release-fork.yml; once the head is reachable from
+          # the base, GitHub records the PR as merged.
+          git push --force-with-lease origin "$branch:$base"
+          echo "Landed $branch onto $base; release-fork.yml builds on the push."
+
+          # Tidy up the sync branch - the GitHub Release is the durable record.
+          sleep 5
+          git push origin --delete "$branch" || true
+
+      - name: Open issue on conflict
+        if: steps.guard.outputs.skip == 'false' && steps.rebase.outputs.ok == 'false'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          tag="${{ steps.up.outputs.tag }}"
+          body=$'Rebasing the KaTeX patch stack onto upstream `'"$tag"$'` hit conflicts the bot could not resolve:\n\n```\n${{ steps.rebase.outputs.conflicts }}\n```\n\nResolve it locally (see FORK.md > Manual sync), then force-push the default branch - that push fires the release build. While this issue is open the daily sync stands down; close it once you have landed `'"$tag"$'`.'
+          gh issue create --title "Manual sync needed for upstream $tag" --body "$body" \
+            || echo "Issue creation failed (continuing)."
